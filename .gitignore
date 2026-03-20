@@ -1,0 +1,8 @@
+/target
+/data/*.safetensors
+/data/*.bin
+/tests/vectors/
+*.swp
+*.swo
+*~
+.DS_Store

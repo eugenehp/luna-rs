@@ -1,0 +1,129 @@
+[package]
+name = "luna-rs"
+version = "0.0.1"
+edition = "2021"
+description = "LUNA EEG Foundation Model — inference in Rust with Burn ML"
+keywords      = ["eeg", "foundational", "BCI", "GPU", "CPU"]
+categories    = ["science", "mathematics"]
+authors       = ["Eugene Hauptmann"]
+license       = "Apache-2.0"
+homepage      = "https://github.com/eugenehp/luna-rs"
+repository    = "https://github.com/eugenehp/luna-rs"
+documentation = "https://docs.rs/luna-rs"
+readme        = "README.md"
+
+exclude = [
+    "data/",
+    "figures/",
+    "scripts/",
+    "tests/vectors/",
+    "PLAN.md",
+]
+
+[lib]
+name = "luna_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "infer"
+path = "src/bin/infer.rs"
+
+[[bin]]
+name = "download_weights"
+path = "src/bin/download_weights.rs"
+required-features = ["hf-download"]
+
+[[bin]]
+name = "gen_sample_eeg"
+path = "src/bin/gen_sample_eeg.rs"
+
+[[bin]]
+name = "safetensors_info"
+path = "src/bin/safetensors_info.rs"
+
+[[example]]
+name = "load_and_inspect"
+path = "examples/load_and_inspect.rs"
+
+[[example]]
+name = "reconstruct"
+path = "examples/reconstruct.rs"
+
+[[example]]
+name = "channel_invariance"
+path = "examples/channel_invariance.rs"
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"
+
+[[example]]
+name = "quantize"
+path = "examples/quantize.rs"
+
+[features]
+default = ["ndarray"]
+
+# ── CPU backends ─────────────────────────────────────────────────────────────
+# Default: Rayon multi-threading + SIMD
+ndarray         = ["dep:burn-ndarray", "burn/ndarray"]
+# macOS: Apple Accelerate BLAS (free, fast on Apple Silicon)
+blas-accelerate = ["burn-ndarray?/blas-accelerate"]
+# Linux: system OpenBLAS (apt install libopenblas-dev)
+openblas-system = ["burn-ndarray?/blas-openblas-system"]
+
+# ── GPU backend ──────────────────────────────────────────────────────────────
+# Base wgpu: WGSL shaders, works on all platforms via wgpu runtime
+# (Metal on macOS, Vulkan on Linux/Windows, DX12 on Windows — auto-detected)
+wgpu            = ["burn/wgpu"]
+# macOS: native Metal shader compilation (MSL) — faster than WGSL on Apple GPUs
+metal           = ["wgpu", "burn-wgpu/metal"]
+# Linux/Windows: native Vulkan shader compilation (SPIR-V) — faster than WGSL
+vulkan          = ["wgpu", "burn-wgpu/vulkan"]
+
+# ── Data I/O ─────────────────────────────────────────────────────────────────
+# HDF5 dataset reader (for preprocessed TUH data). Requires libhdf5-dev.
+hdf5            = ["exg/hdf5"]
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+hf-download     = ["dep:hf-hub"]
+
+[dependencies]
+burn = { version = "0.20.1", default-features = false, features = ["std", "simd"] }
+burn-ndarray = { version = "0.20.1", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
+# Direct dep so we can enable metal/vulkan native shader features independently
+burn-wgpu = { version = "0.20.1", default-features = true, optional = true }
+
+ndarray = "0.17"
+# EEG preprocessing — FIF/EDF reader, filtering, resampling, montage, z-score
+exg = { version = "0.0.3", default-features = false }
+# LUNA preprocessing pipeline — bandpass, notch, bipolar montage, epoching
+exg-luna = "0.0.3"
+# FFT for exact frequency embedding (matches torch.fft.rfft)
+rustfft = "6"
+safetensors = "0.7"
+half = { version = "2", features = ["bytemuck"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1.0.102"
+bytemuck = { version = "1", features = ["derive"] }
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"], optional = true }
+
+[dev-dependencies]
+plotters = { version = "0.3", default-features = false, features = [
+    "bitmap_backend", "bitmap_encoder",
+    "ttf",
+    "line_series", "area_series", "full_palette",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+
