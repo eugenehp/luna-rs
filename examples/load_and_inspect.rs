@@ -92,6 +92,11 @@ fn main() -> anyhow::Result<()> {
     println!("  Total attn heads: {}", cfg.total_heads());
 
     let t_load = Instant::now();
+    #[cfg(feature = "wgpu")]
+    let _model = luna_rs::weights::load_model::<burn::backend::Wgpu>(
+        &cfg, weights_path.to_str().unwrap(), 90, &burn::backend::wgpu::WgpuDevice::default(),
+    )?;
+    #[cfg(not(feature = "wgpu"))]
     let _model = luna_rs::weights::load_model::<burn::backend::NdArray>(
         &cfg, weights_path.to_str().unwrap(), 90, &burn::backend::ndarray::NdArrayDevice::Cpu,
     )?;

@@ -203,6 +203,44 @@ pub fn gpu_backend_name() -> &'static str {
     else { "GPU (wgpu — WGSL)" }
 }
 
+/// Run a closure with the appropriate backend based on compiled features.
+///
+/// Uses wgpu (GPU) when the `wgpu` feature is enabled, otherwise NdArray (CPU).
+pub fn with_backend<F>(f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&str, Box<dyn std::any::Any>) -> anyhow::Result<()>,
+{
+    #[cfg(feature = "wgpu")]
+    {
+        let device = burn::backend::wgpu::WgpuDevice::default();
+        f(gpu_backend_name(), Box::new(device))
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+        f(cpu_backend_name(), Box::new(device))
+    }
+}
+
+/// Helper macro to dispatch `run::<B>(device, ...)` based on compiled backend features.
+#[macro_export]
+macro_rules! dispatch_backend {
+    ($run_fn:ident, $($extra_args:expr),* $(,)?) => {{
+        #[cfg(feature = "wgpu")]
+        {
+            type B = burn::backend::Wgpu;
+            let device = burn::backend::wgpu::WgpuDevice::default();
+            $run_fn::<B>(device, $($extra_args),*)
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            type B = burn::backend::NdArray;
+            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+            $run_fn::<B>(device, $($extra_args),*)
+        }
+    }};
+}
+
 // ── Step timer ────────────────────────────────────────────────────────────────
 
 pub struct StepTimer {

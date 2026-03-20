@@ -40,7 +40,7 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    run::<burn::backend::NdArray>(burn::backend::ndarray::NdArrayDevice::Cpu, args)
+    dispatch_backend!(run, args)
 }
 
 fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
