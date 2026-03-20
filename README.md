@@ -54,6 +54,56 @@ Weights hosted at [`thorir/LUNA`](https://huggingface.co/thorir/LUNA) on Hugging
 
 ---
 
+## Benchmarks
+
+Inference benchmarks across two platforms: **Linux aarch64 VM** (16C/16T, 46GB RAM, Virtio/Vulkan GPU) and **Apple M3 Max** (12C/16T, 48GB RAM, Metal GPU). All runs use 22 EEG channels × 1280 samples (5s @ 256Hz), 3 warmup + 10 timed runs.
+
+### Inference Latency
+
+![Inference Latency](./figures/inference_latency.png)
+
+| Variant | Linux CPU | Linux GPU (Vulkan) | M3 Max CPU (Accelerate) | M3 Max GPU (Metal) |
+|---------|-----------|-------------------|------------------------|-------------------|
+| **Base** (7M) | 82.3 ms | 226.1 ms | 26.5 ms | **13.2 ms** |
+| **Large** (43M) | 181.1 ms | 328.2 ms | 64.2 ms | **13.0 ms** |
+| **Huge** (311M) | 2550.7 ms | 771.2 ms | 602.7 ms | **23.6 ms** |
+
+### Speedup vs Linux CPU Baseline
+
+![Speedup](./figures/speedup.png)
+
+| Variant | M3 Max CPU | M3 Max GPU (Metal) |
+|---------|-----------|-------------------|
+| **Base** | 3.1× | **6.2×** |
+| **Large** | 2.8× | **13.9×** |
+| **Huge** | 4.2× | **108.1×** |
+
+### Model Load Time
+
+![Load Time](./figures/load_time.png)
+
+### Latency Distribution
+
+![Latency Distribution](./figures/latency_distribution.png)
+
+### Channel Scaling
+
+![Channel Scaling](./figures/channel_scaling.png)
+
+M3 Max Metal GPU latency is nearly flat across channel counts (12–25ms regardless of 4 or 32 channels), showing the GPU is compute-bound rather than memory-bound at these sizes.
+
+### Run Benchmarks
+
+```sh
+# All variants, CPU vs GPU
+./bench.sh base,large,huge
+
+# Custom warmup/runs
+./bench.sh base,large,huge 5 20
+```
+
+---
+
 ## Quick Start
 
 ```sh
