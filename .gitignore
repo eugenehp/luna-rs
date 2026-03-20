@@ -2,7 +2,6 @@
 /data/*.safetensors
 /data/*.bin
 /tests/vectors/
-/bench_results/
 *.swp
 *.swo
 *~
