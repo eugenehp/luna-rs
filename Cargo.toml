@@ -17,6 +17,8 @@ exclude = [
     "figures/",
     "scripts/",
     "tests/vectors/",
+    "bench_results/",
+    "bench.sh",
     "PLAN.md",
 ]
 

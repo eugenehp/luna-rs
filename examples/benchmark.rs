@@ -10,6 +10,7 @@
 ///   cargo run --example benchmark --release --features hf-download
 ///   cargo run --example benchmark --release --features hf-download -- --variants base,large
 ///   cargo run --example benchmark --release --features hf-download -- --warmup 3 --runs 5
+///   cargo run --example benchmark --release --features hf-download -- --json > results.json
 
 #[path = "common/mod.rs"]
 mod common;
@@ -36,6 +37,9 @@ struct Args {
     /// Number of timed runs.
     #[arg(long, default_value_t = 5)]
     runs: usize,
+    /// Output results as JSON (machine-readable).
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -44,9 +48,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  LUNA — Inference Benchmark                                 ║");
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
+    let json_mode = args.json;
+
+    if !json_mode {
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║  LUNA — Inference Benchmark                                 ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+    }
 
     let variants: Vec<&str> = args.variants.split(',').map(|s| s.trim()).collect();
     let n_channels = 22;
@@ -56,8 +64,13 @@ fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
     let signal = common::generate_synthetic_eeg(n_channels, n_samples, 256.0);
     let positions = common::tueg_positions();
 
+    // Collect JSON results
+    let mut json_results: Vec<serde_json::Value> = Vec::new();
+
     for variant in &variants {
-        println!("━━━ LUNA-{} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", variant);
+        if !json_mode {
+            eprintln!("━━━ LUNA-{} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", variant);
+        }
 
         // Load
         let weights_path = common::resolve_weights(
@@ -70,14 +83,18 @@ fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
             &cfg, weights_path.to_str().unwrap(), 90, &device,
         )?;
         let ms_load = t.elapsed().as_secs_f64() * 1000.0;
-        println!("  Load:    {ms_load:.0} ms");
-        println!("  Config:  D={}, Q={}, depth={}, heads={}", cfg.embed_dim, cfg.num_queries, cfg.depth, cfg.num_heads);
+        if !json_mode {
+            eprintln!("  Load:    {ms_load:.0} ms");
+            eprintln!("  Config:  D={}, Q={}, depth={}, heads={}", cfg.embed_dim, cfg.num_queries, cfg.depth, cfg.num_heads);
+        }
 
         let head_dim = cfg.hidden_dim() / cfg.total_heads();
         let rope = luna_rs::model::rope::RotaryEmbedding::new(head_dim, 1024, 10_000.0, &device);
 
         // Benchmark standard input (22ch × 1280)
-        println!("\n  ▸ Standard input: {}ch × {} samples", n_channels, n_samples);
+        if !json_mode {
+            eprintln!("\n  ▸ Standard input: {}ch × {} samples", n_channels, n_samples);
+        }
         let batch = data::build_batch::<B>(
             signal.clone(), positions.clone(), None, n_channels, n_samples, &device,
         );
@@ -98,12 +115,22 @@ fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
         let mean_ms = times.iter().sum::<f64>() / times.len() as f64;
         let min_ms = times.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_ms = times.iter().cloned().fold(0.0f64, f64::max);
-        println!("    mean={mean_ms:.1}ms  min={min_ms:.1}ms  max={max_ms:.1}ms  (n={})", args.runs);
+        let std_ms = (times.iter().map(|t| (t - mean_ms).powi(2)).sum::<f64>() / times.len() as f64).sqrt();
+
+        if !json_mode {
+            eprintln!("    mean={mean_ms:.1}ms  min={min_ms:.1}ms  max={max_ms:.1}ms  (n={})", args.runs);
+        }
 
         // Channel scaling benchmark
-        println!("\n  ▸ Channel scaling (fixed T=1280):");
-        println!("    {:>6}  {:>10}", "Chans", "Mean (ms)");
-        for &nc in &[4, 8, 16, 22, 32] {
+        if !json_mode {
+            eprintln!("\n  ▸ Channel scaling (fixed T=1280):");
+            eprintln!("    {:>6}  {:>10}", "Chans", "Mean (ms)");
+        }
+
+        let channel_counts = [4, 8, 16, 22, 32];
+        let mut channel_scaling: Vec<serde_json::Value> = Vec::new();
+
+        for &nc in &channel_counts {
             let sig = common::generate_synthetic_eeg(nc, n_samples, 256.0);
             let pos: Vec<f32> = (0..nc).flat_map(|i| {
                 let frac = i as f32 / nc as f32;
@@ -120,11 +147,55 @@ fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
                 t_vec.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             let avg = t_vec.iter().sum::<f64>() / t_vec.len() as f64;
-            println!("    {:>6}  {:>7.1} ms", nc, avg);
+            let cs_min = t_vec.iter().cloned().fold(f64::INFINITY, f64::min);
+            let cs_max = t_vec.iter().cloned().fold(0.0f64, f64::max);
+
+            if !json_mode {
+                eprintln!("    {:>6}  {:>7.1} ms", nc, avg);
+            }
+
+            channel_scaling.push(serde_json::json!({
+                "channels": nc,
+                "mean_ms": (avg * 100.0).round() / 100.0,
+                "min_ms": (cs_min * 100.0).round() / 100.0,
+                "max_ms": (cs_max * 100.0).round() / 100.0,
+                "runs": t_vec,
+            }));
         }
-        println!();
+
+        if !json_mode {
+            eprintln!();
+        }
+
+        json_results.push(serde_json::json!({
+            "variant": variant,
+            "config": {
+                "embed_dim": cfg.embed_dim,
+                "num_queries": cfg.num_queries,
+                "depth": cfg.depth,
+                "num_heads": cfg.num_heads,
+            },
+            "load_ms": (ms_load * 100.0).round() / 100.0,
+            "inference": {
+                "channels": n_channels,
+                "samples": n_samples,
+                "warmup": args.warmup,
+                "runs": args.runs,
+                "mean_ms": (mean_ms * 100.0).round() / 100.0,
+                "min_ms": (min_ms * 100.0).round() / 100.0,
+                "max_ms": (max_ms * 100.0).round() / 100.0,
+                "std_ms": (std_ms * 100.0).round() / 100.0,
+                "all_ms": times,
+            },
+            "channel_scaling": channel_scaling,
+        }));
     }
 
-    println!("Done.");
+    if json_mode {
+        println!("{}", serde_json::to_string_pretty(&json_results)?);
+    } else {
+        eprintln!("Done.");
+    }
+
     Ok(())
 }
