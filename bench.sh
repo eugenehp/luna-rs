@@ -16,6 +16,34 @@ VARIANTS="${1:-base,large,huge}"
 WARMUP="${2:-3}"
 RUNS="${3:-10}"
 
+# ─── Portable timeout ───────────────────────────────────────────────────────
+# macOS doesn't ship GNU timeout; use perl fallback
+if command -v timeout &>/dev/null; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout"   # brew install coreutils
+else
+    # Pure-bash fallback using background process + wait
+    _timeout() {
+        local secs="$1"; shift
+        "$@" &
+        local pid=$!
+        ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null ) &
+        local watchdog=$!
+        if wait "$pid" 2>/dev/null; then
+            kill -TERM "$watchdog" 2>/dev/null
+            wait "$watchdog" 2>/dev/null || true
+            return 0
+        else
+            local rc=$?
+            kill -TERM "$watchdog" 2>/dev/null
+            wait "$watchdog" 2>/dev/null || true
+            return $rc
+        fi
+    }
+    TIMEOUT_CMD="_timeout"
+fi
+
 # ─── Platform Detection ─────────────────────────────────────────────────────
 
 OS="$(uname -s)"
@@ -216,7 +244,7 @@ TIMEOUT=$(( VARIANT_COUNT * 300 ))
 CPU_JSON="$RUN_DIR/cpu.json"
 CPU_LOG="$RUN_DIR/cpu.log"
 echo "━━━ Running CPU benchmark (timeout ${TIMEOUT}s) ━━━"
-if timeout "$TIMEOUT" cargo run --release --example benchmark --features "$CPU_FEATURES" \
+if $TIMEOUT_CMD "$TIMEOUT" cargo run --release --example benchmark --features "$CPU_FEATURES" \
     -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
     > "$CPU_JSON" 2>"$CPU_LOG"; then
     echo "  ✓ CPU results → $CPU_JSON"
@@ -231,7 +259,7 @@ GPU_JSON="$RUN_DIR/gpu.json"
 GPU_LOG="$RUN_DIR/gpu.log"
 if $GPU_AVAILABLE; then
     echo "━━━ Running GPU benchmark (timeout ${TIMEOUT}s) ━━━"
-    if timeout "$TIMEOUT" cargo run --release --example benchmark --no-default-features --features "$GPU_FEATURE" \
+    if $TIMEOUT_CMD "$TIMEOUT" cargo run --release --example benchmark --no-default-features --features "$GPU_FEATURE" \
         -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
         > "$GPU_JSON" 2>"$GPU_LOG"; then
         echo "  ✓ GPU results → $GPU_JSON"
@@ -246,6 +274,14 @@ fi
 # ─── Generate Charts ─────────────────────────────────────────────────────────
 
 echo "━━━ Generating charts ━━━"
+
+# Validate JSON files exist and are valid before charting
+if [ ! -s "$CPU_JSON" ] || ! python3 -c "import json; json.load(open('$CPU_JSON'))" 2>/dev/null; then
+    echo "  ⚠  No valid CPU results — cannot generate charts."
+    echo "  Check $CPU_LOG for errors."
+    [ -f "$CPU_LOG" ] && echo "" && cat "$CPU_LOG"
+    exit 1
+fi
 
 python3 - "$RUN_DIR" "$GPU_AVAILABLE" "$CPU_NAME" "$GPU_NAME" "$DATE_HUMAN" <<'PYEOF'
 import json, sys, os
