@@ -22,20 +22,26 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 detect_cpu() {
+    local result=""
     case "$OS" in
         Darwin)
-            sysctl -n machdep.cpu.brand_string 2>/dev/null \
+            result="$(sysctl -n machdep.cpu.brand_string 2>/dev/null \
                 || sysctl -n hw.model 2>/dev/null \
-                || echo "Unknown"
+                || echo "")"
             ;;
         Linux)
-            grep -m1 'model name' /proc/cpuinfo 2>/dev/null \
-                | sed 's/model name\s*:\s*//' \
-                || lscpu 2>/dev/null | grep -m1 'Model name' | sed 's/Model name:\s*//' \
-                || echo "Unknown"
+            result="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null \
+                | sed 's/model name\s*:\s*//' || echo "")"
+            if [ -z "$result" ]; then
+                result="$(lscpu 2>/dev/null | grep -m1 'Model name' | sed 's/.*Model name:\s*//' || echo "")"
+            fi
+            if [ -z "$result" ]; then
+                # Fallback: architecture + nproc
+                result="${ARCH} $(nproc 2>/dev/null || echo '?')cores"
+            fi
             ;;
-        *) echo "Unknown" ;;
     esac
+    echo "${result:-Unknown_CPU}"
 }
 
 detect_gpu() {
@@ -200,34 +206,40 @@ else
     echo ""
 fi
 
+# ─── Per-variant timeout (seconds) ───────────────────────────────────────────
+# Generous: 5 minutes per variant should be enough for even LUNA-Huge on slow HW
+VARIANT_COUNT=$(echo "$VARIANTS" | tr ',' '\n' | wc -l)
+TIMEOUT=$(( VARIANT_COUNT * 300 ))
+
 # ─── Run CPU Benchmark ───────────────────────────────────────────────────────
 
 CPU_JSON="$RUN_DIR/cpu.json"
-echo "━━━ Running CPU benchmark ━━━"
-cargo run --release --example benchmark --features "$CPU_FEATURES" \
+CPU_LOG="$RUN_DIR/cpu.log"
+echo "━━━ Running CPU benchmark (timeout ${TIMEOUT}s) ━━━"
+if timeout "$TIMEOUT" cargo run --release --example benchmark --features "$CPU_FEATURES" \
     -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
-    > "$CPU_JSON" 2>&1 || {
-        # If --json output went to stderr (progress), retry capturing properly
-        cargo run --release --example benchmark --features "$CPU_FEATURES" \
-            -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
-            2>/dev/null > "$CPU_JSON"
-    }
-echo "  ✓ CPU results → $CPU_JSON"
+    > "$CPU_JSON" 2>"$CPU_LOG"; then
+    echo "  ✓ CPU results → $CPU_JSON"
+else
+    echo "  ⚠  CPU benchmark failed or timed out (see $CPU_LOG)"
+fi
 echo ""
 
 # ─── Run GPU Benchmark ───────────────────────────────────────────────────────
 
 GPU_JSON="$RUN_DIR/gpu.json"
+GPU_LOG="$RUN_DIR/gpu.log"
 if $GPU_AVAILABLE; then
-    echo "━━━ Running GPU benchmark ━━━"
-    cargo run --release --example benchmark --no-default-features --features "$GPU_FEATURE" \
+    echo "━━━ Running GPU benchmark (timeout ${TIMEOUT}s) ━━━"
+    if timeout "$TIMEOUT" cargo run --release --example benchmark --no-default-features --features "$GPU_FEATURE" \
         -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
-        > "$GPU_JSON" 2>&1 || {
-            cargo run --release --example benchmark --no-default-features --features "$GPU_FEATURE" \
-                -- --variants "$VARIANTS" --warmup "$WARMUP" --runs "$RUNS" --json \
-                2>/dev/null > "$GPU_JSON"
-        }
-    echo "  ✓ GPU results → $GPU_JSON"
+        > "$GPU_JSON" 2>"$GPU_LOG"; then
+        echo "  ✓ GPU results → $GPU_JSON"
+    else
+        echo "  ⚠  GPU benchmark failed or timed out (see $GPU_LOG)"
+        GPU_AVAILABLE=false
+        rm -f "$GPU_JSON"
+    fi
     echo ""
 fi
 

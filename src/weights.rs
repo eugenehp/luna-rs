@@ -212,7 +212,7 @@ pub fn load_model<B: Backend>(
     device: &B::Device,
 ) -> anyhow::Result<Luna<B>> {
     let wm = WeightMap::from_file(weights_path)?;
-    println!("Loading {} weight tensors...", wm.tensors.len());
+    eprintln!("Loading {} weight tensors...", wm.tensors.len());
     load_model_from_wm(cfg, &wm, n_channel_names, device)
 }
 
