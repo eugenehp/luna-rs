@@ -7,3 +7,4 @@
 *.swo
 *~
 .DS_Store
+.github_activity
