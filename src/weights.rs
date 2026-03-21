@@ -33,21 +33,52 @@ use crate::config::ModelConfig;
 
 // ── Raw tensor map ────────────────────────────────────────────────────────────
 
+/// Optional prefix filter for [`WeightMap::from_file_filtered`].
+///
+/// When set to `Encoder`, only encoder tensors are loaded — `decoder_head.*`
+/// and `classifier.*` keys are skipped, saving bf16→f32 conversion work and
+/// memory when only embeddings are needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightFilter {
+    /// Load every tensor in the file.
+    All,
+    /// Load only encoder tensors (skip decoder_head and classifier).
+    Encoder,
+}
+
 pub struct WeightMap {
     pub tensors: HashMap<String, (Vec<f32>, Vec<usize>)>,
 }
 
 impl WeightMap {
+    /// Load all tensors from a safetensors file.
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        Self::from_file_filtered(path, WeightFilter::All)
+    }
+
+    /// Load tensors from a safetensors file, optionally filtering by component.
+    ///
+    /// When `filter` is [`WeightFilter::Encoder`], decoder_head and classifier
+    /// tensors are skipped entirely — no bf16→f32 conversion or allocation is
+    /// performed for them.
+    pub fn from_file_filtered(path: &str, filter: WeightFilter) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)?;
         let st = SafeTensors::deserialize(&bytes)?;
-        let mut tensors = HashMap::new();
+        let n_tensors = st.len();
+        let mut tensors = HashMap::with_capacity(n_tensors);
 
         for (raw_key, view) in st.tensors() {
             let key = raw_key
                 .strip_prefix("model.")
                 .unwrap_or(raw_key.as_str())
                 .to_string();
+
+            // Skip tensors that don't match the filter.
+            if filter == WeightFilter::Encoder
+                && (key.starts_with("decoder_head.") || key.starts_with("classifier."))
+            {
+                continue;
+            }
 
             let shape: Vec<usize> = view.shape().to_vec();
             let data = view.data();
@@ -70,6 +101,32 @@ impl WeightMap {
         Ok(Self { tensors })
     }
 
+    /// Take a tensor by key, **removing** it from the map to avoid cloning.
+    ///
+    /// Prefer this over [`Self::get`] when you are loading weights into a model
+    /// and won't need the same key again — it avoids a full `Vec<f32>` clone.
+    pub fn take<B: Backend, const N: usize>(
+        &mut self,
+        key: &str,
+        device: &B::Device,
+    ) -> anyhow::Result<Tensor<B, N>> {
+        let (data, shape) = self.tensors.remove(key)
+            .ok_or_else(|| anyhow::anyhow!("weight key not found: {key}"))?;
+
+        if shape.len() != N {
+            anyhow::bail!("rank mismatch for {key}: expected {N}, got {}", shape.len());
+        }
+
+        Ok(Tensor::<B, N>::from_data(
+            TensorData::new(data, shape),
+            device,
+        ))
+    }
+
+    /// Load a tensor by its (prefix-stripped) safetensors key.
+    ///
+    /// **Note:** this clones the underlying `Vec<f32>`.  Prefer [`Self::take`]
+    /// when each key is consumed exactly once (typical weight-loading pattern).
     pub fn get<B: Backend, const N: usize>(
         &self,
         key: &str,
@@ -141,21 +198,23 @@ fn set_conv2d_wb<B: Backend>(conv: &mut burn::nn::conv::Conv2d<B>, w: Tensor<B, 
 /// Load nn.MultiheadAttention fused weights into FusedMultiheadAttention.
 /// PyTorch stores in_proj_weight [3*D, D] and in_proj_bias [3*D].
 /// Our FusedMultiheadAttention has a single Linear(D, 3*D).
+///
+/// Uses [`WeightMap::take`] to move tensor data without cloning.
 fn load_fused_mha<B: Backend>(
-    wm: &WeightMap,
+    wm: &mut WeightMap,
     mha: &mut crate::model::cross_attention::FusedMultiheadAttention<B>,
     prefix: &str,
     device: &B::Device,
 ) -> anyhow::Result<()> {
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>(&format!("{prefix}.in_proj_weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.in_proj_bias"), device),
+        wm.take::<B, 2>(&format!("{prefix}.in_proj_weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.in_proj_bias"), device),
     ) {
         set_linear_wb(&mut mha.in_proj, w, b);
     }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>(&format!("{prefix}.out_proj.weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.out_proj.bias"), device),
+        wm.take::<B, 2>(&format!("{prefix}.out_proj.weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.out_proj.bias"), device),
     ) {
         set_linear_wb(&mut mha.out_proj, w, b);
     }
@@ -163,16 +222,18 @@ fn load_fused_mha<B: Backend>(
 }
 
 /// Load nn.TransformerEncoderLayer weights.
+///
+/// Uses [`WeightMap::take`] to move tensor data without cloning.
 fn load_encoder_layer<B: Backend>(
-    wm: &WeightMap,
+    wm: &mut WeightMap,
     layer: &mut crate::model::cross_attention::TransformerEncoderLayer<B>,
     prefix: &str,
     device: &B::Device,
 ) -> anyhow::Result<()> {
     // norm1
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>(&format!("{prefix}.norm1.weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.norm1.bias"), device),
+        wm.take::<B, 1>(&format!("{prefix}.norm1.weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.norm1.bias"), device),
     ) {
         set_layernorm(&mut layer.norm1, w, b);
     }
@@ -180,22 +241,22 @@ fn load_encoder_layer<B: Backend>(
     load_fused_mha(wm, &mut layer.self_attn, &format!("{prefix}.self_attn"), device)?;
     // norm2
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>(&format!("{prefix}.norm2.weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.norm2.bias"), device),
+        wm.take::<B, 1>(&format!("{prefix}.norm2.weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.norm2.bias"), device),
     ) {
         set_layernorm(&mut layer.norm2, w, b);
     }
     // linear1
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>(&format!("{prefix}.linear1.weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.linear1.bias"), device),
+        wm.take::<B, 2>(&format!("{prefix}.linear1.weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.linear1.bias"), device),
     ) {
         set_linear_wb(&mut layer.linear1, w, b);
     }
     // linear2
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>(&format!("{prefix}.linear2.weight"), device),
-        wm.get::<B, 1>(&format!("{prefix}.linear2.bias"), device),
+        wm.take::<B, 2>(&format!("{prefix}.linear2.weight"), device),
+        wm.take::<B, 1>(&format!("{prefix}.linear2.bias"), device),
     ) {
         set_linear_wb(&mut layer.linear2, w, b);
     }
@@ -211,17 +272,19 @@ pub fn load_model<B: Backend>(
     n_channel_names: usize,
     device: &B::Device,
 ) -> anyhow::Result<Luna<B>> {
-    let wm = WeightMap::from_file(weights_path)?;
+    let mut wm = WeightMap::from_file(weights_path)?;
     eprintln!("Loading {} weight tensors...", wm.tensors.len());
-    load_model_from_wm(cfg, &wm, n_channel_names, device)
+    load_model_from_wm(cfg, &mut wm, n_channel_names, device)
 }
 
 /// Load a LUNA model from a pre-loaded [`WeightMap`].
 ///
 /// Useful for loading from quantized/dequantized weights.
+///
+/// Uses [`WeightMap::take`] to move tensor data out of the map without cloning.
 pub fn load_model_from_wm<B: Backend>(
     cfg: &ModelConfig,
-    wm: &WeightMap,
+    wm: &mut WeightMap,
     n_channel_names: usize,
     device: &B::Device,
 ) -> anyhow::Result<Luna<B>> {
@@ -236,7 +299,7 @@ pub fn load_model_from_wm<B: Backend>(
 }
 
 fn load_luna_weights<B: Backend>(
-    wm: &WeightMap,
+    wm: &mut WeightMap,
     model: &mut Luna<B>,
     device: &B::Device,
 ) -> anyhow::Result<()> {
@@ -245,39 +308,39 @@ fn load_luna_weights<B: Backend>(
     // proj_in.3 = Conv2d, proj_in.4 = GroupNorm, proj_in.5 = GELU
     // proj_in.6 = Conv2d, proj_in.7 = GroupNorm, proj_in.8 = GELU
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 4>("patch_embed.proj_in.0.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.0.bias", device),
+        wm.take::<B, 4>("patch_embed.proj_in.0.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.0.bias", device),
     ) { set_conv2d_wb(&mut model.patch_embed.conv1, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("patch_embed.proj_in.1.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.1.bias", device),
+        wm.take::<B, 1>("patch_embed.proj_in.1.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.1.bias", device),
     ) { set_groupnorm(&mut model.patch_embed.gn1, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 4>("patch_embed.proj_in.3.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.3.bias", device),
+        wm.take::<B, 4>("patch_embed.proj_in.3.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.3.bias", device),
     ) { set_conv2d_wb(&mut model.patch_embed.conv2, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("patch_embed.proj_in.4.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.4.bias", device),
+        wm.take::<B, 1>("patch_embed.proj_in.4.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.4.bias", device),
     ) { set_groupnorm(&mut model.patch_embed.gn2, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 4>("patch_embed.proj_in.6.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.6.bias", device),
+        wm.take::<B, 4>("patch_embed.proj_in.6.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.6.bias", device),
     ) { set_conv2d_wb(&mut model.patch_embed.conv3, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("patch_embed.proj_in.7.weight", device),
-        wm.get::<B, 1>("patch_embed.proj_in.7.bias", device),
+        wm.take::<B, 1>("patch_embed.proj_in.7.weight", device),
+        wm.take::<B, 1>("patch_embed.proj_in.7.bias", device),
     ) { set_groupnorm(&mut model.patch_embed.gn3, w, b); }
 
     // ── Frequency embedder ──────────────────────────────────────────────────
     // Python: freq_embed.frequency_to_embed = timm.Mlp(fc1, fc2)
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("freq_embed.frequency_to_embed.fc1.weight", device),
-        wm.get::<B, 1>("freq_embed.frequency_to_embed.fc1.bias", device),
+        wm.take::<B, 2>("freq_embed.frequency_to_embed.fc1.weight", device),
+        wm.take::<B, 1>("freq_embed.frequency_to_embed.fc1.bias", device),
     ) { set_linear_wb(&mut model.freq_embed.fc1, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("freq_embed.frequency_to_embed.fc2.weight", device),
-        wm.get::<B, 1>("freq_embed.frequency_to_embed.fc2.bias", device),
+        wm.take::<B, 2>("freq_embed.frequency_to_embed.fc2.weight", device),
+        wm.take::<B, 1>("freq_embed.frequency_to_embed.fc2.bias", device),
     ) { set_linear_wb(&mut model.freq_embed.fc2, w, b); }
 
     // ── Channel location embedder ───────────────────────────────────────────
@@ -287,29 +350,29 @@ fn load_luna_weights<B: Backend>(
     //   channel_location_embedder.0.norm.weight/bias  (LayerNorm between fc1 and fc2)
     //   channel_location_embedder.0.fc2.weight/bias
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("channel_location_embedder.0.fc1.weight", device),
-        wm.get::<B, 1>("channel_location_embedder.0.fc1.bias", device),
+        wm.take::<B, 2>("channel_location_embedder.0.fc1.weight", device),
+        wm.take::<B, 1>("channel_location_embedder.0.fc1.bias", device),
     ) { set_linear_wb(&mut model.chan_loc_fc1, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("channel_location_embedder.0.norm.weight", device),
-        wm.get::<B, 1>("channel_location_embedder.0.norm.bias", device),
+        wm.take::<B, 1>("channel_location_embedder.0.norm.weight", device),
+        wm.take::<B, 1>("channel_location_embedder.0.norm.bias", device),
     ) { set_layernorm(&mut model.chan_loc_norm, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("channel_location_embedder.0.fc2.weight", device),
-        wm.get::<B, 1>("channel_location_embedder.0.fc2.bias", device),
+        wm.take::<B, 2>("channel_location_embedder.0.fc2.weight", device),
+        wm.take::<B, 1>("channel_location_embedder.0.fc2.bias", device),
     ) { set_linear_wb(&mut model.chan_loc_fc2, w, b); }
 
     // ── Mask token ──────────────────────────────────────────────────────────
-    if let Ok(t) = wm.get::<B, 3>("mask_token", device) {
+    if let Ok(t) = wm.take::<B, 3>("mask_token", device) {
         model.mask_token = model.mask_token.clone().map(|_| t);
     }
 
     // ── Cross-attention block ───────────────────────────────────────────────
-    if let Ok(t) = wm.get::<B, 3>("cross_attn.query_embed", device) {
+    if let Ok(t) = wm.take::<B, 3>("cross_attn.query_embed", device) {
         model.cross_attn.query_embed = model.cross_attn.query_embed.clone().map(|_| t);
     }
     if wm.has("cross_attn.temparature") {
-        if let Ok(t) = wm.get::<B, 1>("cross_attn.temparature", device) {
+        if let Ok(t) = wm.take::<B, 1>("cross_attn.temparature", device) {
             model.cross_attn.temperature = model.cross_attn.temperature.clone().map(|_| t);
         }
     }
@@ -317,29 +380,29 @@ fn load_luna_weights<B: Backend>(
     load_fused_mha(wm, &mut model.cross_attn.cross_attention, "cross_attn.cross_attention", device)?;
     // FFN (timm.Mlp with norm_layer)
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("cross_attn.ffn.fc1.weight", device),
-        wm.get::<B, 1>("cross_attn.ffn.fc1.bias", device),
+        wm.take::<B, 2>("cross_attn.ffn.fc1.weight", device),
+        wm.take::<B, 1>("cross_attn.ffn.fc1.bias", device),
     ) { set_linear_wb(&mut model.cross_attn.ffn_fc1, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("cross_attn.ffn.norm.weight", device),
-        wm.get::<B, 1>("cross_attn.ffn.norm.bias", device),
+        wm.take::<B, 1>("cross_attn.ffn.norm.weight", device),
+        wm.take::<B, 1>("cross_attn.ffn.norm.bias", device),
     ) { set_layernorm(&mut model.cross_attn.ffn_norm, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 2>("cross_attn.ffn.fc2.weight", device),
-        wm.get::<B, 1>("cross_attn.ffn.fc2.bias", device),
+        wm.take::<B, 2>("cross_attn.ffn.fc2.weight", device),
+        wm.take::<B, 1>("cross_attn.ffn.fc2.bias", device),
     ) { set_linear_wb(&mut model.cross_attn.ffn_fc2, w, b); }
     // Pre-attention norms
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("cross_attn.queries_norm.weight", device),
-        wm.get::<B, 1>("cross_attn.queries_norm.bias", device),
+        wm.take::<B, 1>("cross_attn.queries_norm.weight", device),
+        wm.take::<B, 1>("cross_attn.queries_norm.bias", device),
     ) { set_layernorm(&mut model.cross_attn.queries_norm, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("cross_attn.keys_norm.weight", device),
-        wm.get::<B, 1>("cross_attn.keys_norm.bias", device),
+        wm.take::<B, 1>("cross_attn.keys_norm.weight", device),
+        wm.take::<B, 1>("cross_attn.keys_norm.bias", device),
     ) { set_layernorm(&mut model.cross_attn.keys_norm, w, b); }
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("cross_attn.values_norm.weight", device),
-        wm.get::<B, 1>("cross_attn.values_norm.bias", device),
+        wm.take::<B, 1>("cross_attn.values_norm.weight", device),
+        wm.take::<B, 1>("cross_attn.values_norm.bias", device),
     ) { set_layernorm(&mut model.cross_attn.values_norm, w, b); }
     // Query self-attention (3-layer TransformerEncoder)
     // Python: cross_attn.query_self_attn.layers.{i}.<sublayer>
@@ -354,42 +417,42 @@ fn load_luna_weights<B: Backend>(
         let p = format!("blocks.{i}");
         // norm1
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{p}.norm1.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.norm1.bias"), device),
+            wm.take::<B, 1>(&format!("{p}.norm1.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.norm1.bias"), device),
         ) { set_layernorm(&mut block.norm1, w, b); }
         // attn: RotarySelfAttentionBlock has qkv_proj (Linear) and proj (Linear)
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{p}.attn.qkv_proj.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.attn.qkv_proj.bias"), device),
+            wm.take::<B, 2>(&format!("{p}.attn.qkv_proj.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.attn.qkv_proj.bias"), device),
         ) { set_linear_wb(&mut block.attn.qkv, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{p}.attn.proj.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.attn.proj.bias"), device),
+            wm.take::<B, 2>(&format!("{p}.attn.proj.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.attn.proj.bias"), device),
         ) { set_linear_wb(&mut block.attn.proj, w, b); }
         // norm2
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{p}.norm2.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.norm2.bias"), device),
+            wm.take::<B, 1>(&format!("{p}.norm2.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.norm2.bias"), device),
         ) { set_layernorm(&mut block.norm2, w, b); }
         // mlp: FeedForwardBlock has fc1, norm (LayerNorm on hidden), fc2
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{p}.mlp.fc1.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.mlp.fc1.bias"), device),
+            wm.take::<B, 2>(&format!("{p}.mlp.fc1.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.mlp.fc1.bias"), device),
         ) { set_linear_wb(&mut block.mlp.fc1, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{p}.mlp.norm.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.mlp.norm.bias"), device),
+            wm.take::<B, 1>(&format!("{p}.mlp.norm.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.mlp.norm.bias"), device),
         ) { set_layernorm(&mut block.mlp.norm, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{p}.mlp.fc2.weight"), device),
-            wm.get::<B, 1>(&format!("{p}.mlp.fc2.bias"), device),
+            wm.take::<B, 2>(&format!("{p}.mlp.fc2.weight"), device),
+            wm.take::<B, 1>(&format!("{p}.mlp.fc2.bias"), device),
         ) { set_linear_wb(&mut block.mlp.fc2, w, b); }
     }
 
     // ── Final norm ──────────────────────────────────────────────────────────
     if let (Ok(w), Ok(b)) = (
-        wm.get::<B, 1>("norm.weight", device),
-        wm.get::<B, 1>("norm.bias", device),
+        wm.take::<B, 1>("norm.weight", device),
+        wm.take::<B, 1>("norm.bias", device),
     ) { set_layernorm(&mut model.norm, w, b); }
 
     // ── Reconstruction head (decoder_head) ──────────────────────────────────
@@ -398,65 +461,65 @@ fn load_luna_weights<B: Backend>(
         let dp = "decoder_head.decoder_pred.layers.0";
         // Sub-layer 1: self_attn
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{dp}.norm1.weight"), device),
-            wm.get::<B, 1>(&format!("{dp}.norm1.bias"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm1.weight"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm1.bias"), device),
         ) { set_layernorm(&mut head.self_attn_norm, w, b); }
         load_fused_mha(wm, &mut head.self_attn, &format!("{dp}.self_attn"), device)?;
         // Sub-layer 2: multihead_attn (cross-attention)
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{dp}.norm2.weight"), device),
-            wm.get::<B, 1>(&format!("{dp}.norm2.bias"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm2.weight"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm2.bias"), device),
         ) { set_layernorm(&mut head.cross_attn_norm, w, b); }
         load_fused_mha(wm, &mut head.cross_attn, &format!("{dp}.multihead_attn"), device)?;
         // Sub-layer 3: FFN
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>(&format!("{dp}.norm3.weight"), device),
-            wm.get::<B, 1>(&format!("{dp}.norm3.bias"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm3.weight"), device),
+            wm.take::<B, 1>(&format!("{dp}.norm3.bias"), device),
         ) { set_layernorm(&mut head.ffn_norm, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{dp}.linear1.weight"), device),
-            wm.get::<B, 1>(&format!("{dp}.linear1.bias"), device),
+            wm.take::<B, 2>(&format!("{dp}.linear1.weight"), device),
+            wm.take::<B, 1>(&format!("{dp}.linear1.bias"), device),
         ) { set_linear_wb(&mut head.ffn_linear1, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>(&format!("{dp}.linear2.weight"), device),
-            wm.get::<B, 1>(&format!("{dp}.linear2.bias"), device),
+            wm.take::<B, 2>(&format!("{dp}.linear2.weight"), device),
+            wm.take::<B, 1>(&format!("{dp}.linear2.bias"), device),
         ) { set_linear_wb(&mut head.ffn_linear2, w, b); }
         // Post-decoder norm
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 1>("decoder_head.norm.weight", device),
-            wm.get::<B, 1>("decoder_head.norm.bias", device),
+            wm.take::<B, 1>("decoder_head.norm.weight", device),
+            wm.take::<B, 1>("decoder_head.norm.bias", device),
         ) { set_layernorm(&mut head.output_norm, w, b); }
         // Output MLP: decoder_head.decoder_linear = timm.Mlp(fc1, fc2)
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>("decoder_head.decoder_linear.fc1.weight", device),
-            wm.get::<B, 1>("decoder_head.decoder_linear.fc1.bias", device),
+            wm.take::<B, 2>("decoder_head.decoder_linear.fc1.weight", device),
+            wm.take::<B, 1>("decoder_head.decoder_linear.fc1.bias", device),
         ) { set_linear_wb(&mut head.output_fc1, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>("decoder_head.decoder_linear.fc2.weight", device),
-            wm.get::<B, 1>("decoder_head.decoder_linear.fc2.bias", device),
+            wm.take::<B, 2>("decoder_head.decoder_linear.fc2.weight", device),
+            wm.take::<B, 1>("decoder_head.decoder_linear.fc2.bias", device),
         ) { set_linear_wb(&mut head.output_fc2, w, b); }
     }
 
     // ── Classification head ─────────────────────────────────────────────────
     if let Some(ref mut cls) = model.classifier {
-        if let Ok(t) = wm.get::<B, 3>("classifier.learned_agg", device) {
+        if let Ok(t) = wm.take::<B, 3>("classifier.learned_agg", device) {
             cls.learned_agg = cls.learned_agg.clone().map(|_| t);
         }
         load_fused_mha(wm, &mut cls.decoder_attn, "classifier.decoder_attn", device)?;
         // FFN: classifier.decoder_ffn = timm.Mlp(fc1, fc2)
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>("classifier.decoder_ffn.fc1.weight", device),
-            wm.get::<B, 1>("classifier.decoder_ffn.fc1.bias", device),
+            wm.take::<B, 2>("classifier.decoder_ffn.fc1.weight", device),
+            wm.take::<B, 1>("classifier.decoder_ffn.fc1.bias", device),
         ) { set_linear_wb(&mut cls.ffn_fc1, w, b); }
         if let (Ok(w), Ok(b)) = (
-            wm.get::<B, 2>("classifier.decoder_ffn.fc2.weight", device),
-            wm.get::<B, 1>("classifier.decoder_ffn.fc2.bias", device),
+            wm.take::<B, 2>("classifier.decoder_ffn.fc2.weight", device),
+            wm.take::<B, 1>("classifier.decoder_ffn.fc2.bias", device),
         ) { set_linear_wb(&mut cls.ffn_fc2, w, b); }
     }
 
     // ── Channel embeddings ──────────────────────────────────────────────────
     if let Some(ref mut emb) = model.channel_emb {
-        if let Ok(w) = wm.get::<B, 2>("channel_emb.embeddings.weight", device) {
+        if let Ok(w) = wm.take::<B, 2>("channel_emb.embeddings.weight", device) {
             emb.weight = emb.weight.clone().map(|_| w);
         }
     }

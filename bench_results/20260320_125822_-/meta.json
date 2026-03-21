@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-03-20 12:58:22",
+  "os": "Linux",
+  "arch": "aarch64",
+  "cpu": "-",
+  "cpu_info": "16C/16T, 46GB RAM",
+  "gpu": "Red Hat, Inc. Virtio 1.0 GPU (rev 01)",
+  "gpu_backend": "vulkan",
+  "variants": "base,large,huge",
+  "warmup": 3,
+  "runs": 10,
+  "run_id": "20260320_125822_-"
+}

@@ -76,12 +76,12 @@ fn run<B: Backend>(device: B::Device, args: Args) -> anyhow::Result<()> {
     // 4. Load back and run inference comparison
     println!("▸ Loading quantized model and comparing inference…");
     let t = Instant::now();
-    let wm = QuantizedModel::load_and_dequantize(&args.output)?;
+    let mut wm = QuantizedModel::load_and_dequantize(&args.output)?;
     let ms_load = t.elapsed().as_secs_f64() * 1000.0;
     println!("  Loaded + dequantized in {ms_load:.0} ms");
 
     // Build the model from dequantized weights
-    let model_q = luna_rs::weights::load_model_from_wm::<B>(&cfg, &wm, 90, &device)?;
+    let model_q = luna_rs::weights::load_model_from_wm::<B>(&cfg, &mut wm, 90, &device)?;
     let model_f32 = luna_rs::weights::load_model::<B>(
         &cfg, weights_str, 90, &device,
     )?;

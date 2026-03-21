@@ -1,6 +1,6 @@
 [package]
 name = "luna-rs"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "LUNA EEG Foundation Model — inference in Rust with Burn ML"
 keywords      = ["eeg", "foundational", "BCI", "GPU", "CPU"]
