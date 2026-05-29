@@ -11,10 +11,13 @@
 //!
 //! The test is skipped automatically if vectors or weights aren't present.
 
+mod common;
+
 use std::path::PathBuf;
 
 use burn::backend::NdArray as B;
 use burn::prelude::*;
+use common::{find_weights, SKIP_NO_WEIGHTS};
 
 fn device() -> burn::backend::ndarray::NdArrayDevice {
     burn::backend::ndarray::NdArrayDevice::Cpu
@@ -22,24 +25,6 @@ fn device() -> burn::backend::ndarray::NdArrayDevice {
 
 fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/parity.safetensors")
-}
-
-fn find_weights() -> Option<PathBuf> {
-    let base = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".cache/huggingface/hub")
-    };
-    let snaps = base.join("models--thorir--LUNA").join("snapshots");
-    if !snaps.exists() { return None; }
-    let mut dirs: Vec<_> = std::fs::read_dir(&snaps).ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .collect();
-    dirs.sort_by_key(|e| e.metadata().and_then(|m| m.modified())
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH));
-    let snap = dirs.last()?.path();
-    let w = snap.join("LUNA_base.safetensors");
-    if w.exists() { Some(w) } else { None }
 }
 
 /// Load a 2D f32 tensor from a safetensors file.
@@ -67,7 +52,7 @@ fn parity_with_python() {
         return;
     }
     let Some(weights_path) = find_weights() else {
-        eprintln!("SKIP: LUNA-Base weights not cached");
+        eprintln!("{SKIP_NO_WEIGHTS}");
         return;
     };
 

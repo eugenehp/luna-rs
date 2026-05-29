@@ -1,8 +1,9 @@
-/// Generate synthetic EEG CSV files for testing luna-rs without real data.
-///
-/// Usage:
-///   cargo run --bin gen_sample_eeg --release -- --output sample.csv
-///   cargo run --bin gen_sample_eeg --release -- --output sample.csv --channels 8 --duration 30
+//! Generate synthetic EEG CSV files for testing luna-rs without real data.
+//!
+//! ```sh
+//! cargo run --bin gen_sample_eeg --release -- --output sample.csv
+//! cargo run --bin gen_sample_eeg --release -- --output sample.csv --channels 8 --duration 30
+//! ```
 
 use clap::Parser;
 use std::io::Write;
@@ -51,8 +52,8 @@ fn main() -> anyhow::Result<()> {
 
     // Column header
     write!(f, "timestamp")?;
-    for ch in 0..n_ch {
-        write!(f, ",{}", TUEG_NAMES[ch])?;
+    for name in TUEG_NAMES.iter().take(n_ch) {
+        write!(f, ",{name}")?;
     }
     writeln!(f)?;
 

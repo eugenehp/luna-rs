@@ -3,27 +3,21 @@
 //! Runs the same parity comparison as python_parity.rs but using NdArray<f64>
 //! to eliminate f32 matmul accumulation order as an error source.
 
+mod common;
+
 use std::path::PathBuf;
+
 use burn::prelude::*;
+use common::{find_weights, SKIP_NO_WEIGHTS};
 
 type B = burn::backend::NdArray<f64>;
-fn device() -> burn::backend::ndarray::NdArrayDevice { burn::backend::ndarray::NdArrayDevice::Cpu }
+
+fn device() -> burn::backend::ndarray::NdArrayDevice {
+    burn::backend::ndarray::NdArrayDevice::Cpu
+}
 
 fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/parity.safetensors")
-}
-
-fn find_weights() -> Option<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or(".".into());
-    let snaps = PathBuf::from(&home).join(".cache/huggingface/hub/models--thorir--LUNA/snapshots");
-    if !snaps.exists() { return None; }
-    let mut dirs: Vec<_> = std::fs::read_dir(&snaps).ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .collect();
-    dirs.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
-    let p = dirs.last()?.path().join("LUNA_base.safetensors");
-    if p.exists() { Some(p) } else { None }
 }
 
 fn load_f32(st: &safetensors::SafeTensors, key: &str) -> Vec<f32> {
@@ -38,8 +32,14 @@ fn load_i32_as_i64(st: &safetensors::SafeTensors, key: &str) -> Vec<i64> {
 #[test]
 fn parity_f64() {
     let vpath = vectors_path();
-    if !vpath.exists() { eprintln!("SKIP: no parity vectors"); return; }
-    let Some(wpath) = find_weights() else { eprintln!("SKIP: no weights"); return; };
+    if !vpath.exists() {
+        eprintln!("SKIP: parity vectors not found — run scripts/export_parity_vectors.py");
+        return;
+    }
+    let Some(wpath) = find_weights() else {
+        eprintln!("{SKIP_NO_WEIGHTS}");
+        return;
+    };
 
     let bytes = std::fs::read(&vpath).unwrap();
     let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();

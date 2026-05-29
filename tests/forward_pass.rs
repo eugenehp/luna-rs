@@ -7,31 +7,15 @@
 //!   cargo test --release
 //! after downloading weights (e.g. via the `load_and_inspect` example).
 
-use std::path::PathBuf;
+mod common;
 
 use burn::backend::NdArray as B;
+use common::{find_weights, SKIP_NO_WEIGHTS};
+
 type Dev = burn::backend::ndarray::NdArrayDevice;
 
-fn device() -> Dev { Dev::Cpu }
-
-/// Return path to LUNA-Base weights, or None if not cached.
-fn find_weights() -> Option<PathBuf> {
-    let base = dirs().join("models--thorir--LUNA").join("snapshots");
-    if !base.exists() { return None; }
-    let mut dirs: Vec<_> = std::fs::read_dir(&base).ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .collect();
-    dirs.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
-    let snap = dirs.last()?.path();
-    let w = snap.join("LUNA_base.safetensors");
-    if w.exists() { Some(w) } else { None }
-}
-
-fn dirs() -> PathBuf {
-    if let Ok(v) = std::env::var("HF_HOME") { return PathBuf::from(v).join("hub"); }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".cache").join("huggingface").join("hub")
+fn device() -> Dev {
+    Dev::Cpu
 }
 
 fn luna_base_config() -> luna_rs::ModelConfig {
@@ -47,7 +31,7 @@ fn luna_base_config() -> luna_rs::ModelConfig {
 #[test]
 fn reconstruction_shapes_and_values() {
     let Some(weights_path) = find_weights() else {
-        eprintln!("SKIP: LUNA-Base weights not cached. Run an example with --features hf-download first.");
+        eprintln!("{SKIP_NO_WEIGHTS}");
         return;
     };
 
@@ -139,7 +123,7 @@ fn reconstruction_shapes_and_values() {
 #[test]
 fn channel_vocab_indices_match_embedding_size() {
     let Some(weights_path) = find_weights() else {
-        eprintln!("SKIP: weights not cached");
+        eprintln!("{SKIP_NO_WEIGHTS}");
         return;
     };
 
@@ -165,7 +149,7 @@ fn channel_vocab_indices_match_embedding_size() {
 #[test]
 fn reconstruction_without_channel_names() {
     let Some(weights_path) = find_weights() else {
-        eprintln!("SKIP: weights not cached");
+        eprintln!("{SKIP_NO_WEIGHTS}");
         return;
     };
 
@@ -206,7 +190,7 @@ fn reconstruction_without_channel_names() {
 #[test]
 fn variable_channel_count() {
     let Some(weights_path) = find_weights() else {
-        eprintln!("SKIP: weights not cached");
+        eprintln!("{SKIP_NO_WEIGHTS}");
         return;
     };
 

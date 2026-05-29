@@ -191,7 +191,7 @@ impl<B: Backend> Luna<B> {
     ///
     /// Returns: (x_tokenized [B*S, C, D], channel_locations_emb [num_patches*B, C, D])
     ///          where S = num_patches_per_channel = T / patch_size
-    fn prepare_tokens(
+    pub fn prepare_tokens(
         &self,
         x_signal: Tensor<B, 3>,
         channel_locations: Tensor<B, 3>,

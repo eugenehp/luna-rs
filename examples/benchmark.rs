@@ -1,16 +1,11 @@
-/// Example 4: Benchmark — measure inference latency across model variants and input sizes.
-///
-/// Demonstrates:
-///   - Loading all three LUNA variants (base/large/huge)
-///   - Timing breakdown: weight loading, forward pass
-///   - Scaling behavior with channel count and sequence length
-///   - LUNA's O(Q×C) channel-linear complexity
-///
-/// Usage:
-///   cargo run --example benchmark --release --features hf-download
-///   cargo run --example benchmark --release --features hf-download -- --variants base,large
-///   cargo run --example benchmark --release --features hf-download -- --warmup 3 --runs 5
-///   cargo run --example benchmark --release --features hf-download -- --json > results.json
+//! Burn-only latency benchmark across LUNA variants and channel counts.
+//!
+//! ```sh
+//! cargo run --example benchmark --release --features burn,hf-download
+//! cargo run --example benchmark --release --features burn,hf-download -- --variants base,large
+//! ```
+//!
+//! For Burn vs RLX backends, use `backend_compare`.
 
 #[path = "common/mod.rs"]
 mod common;

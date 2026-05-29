@@ -1,7 +1,8 @@
-/// Print all tensor keys, shapes, and dtypes from a safetensors file.
-///
-/// Usage:
-///   cargo run --bin safetensors_info --release -- model.safetensors
+//! Print tensor keys, shapes, and dtypes from a safetensors file.
+//!
+//! ```sh
+//! cargo run --bin safetensors_info --release -- model.safetensors
+//! ```
 
 use clap::Parser;
 
